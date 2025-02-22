@@ -13,13 +13,23 @@ from .serializers import GiftCardSerializer
 from decimal import Decimal, InvalidOperation
 from user.models import CustomUser
 logger = logging.getLogger(__name__)
-
+from techXplore_hakathon1.settings import CLOUDFLARE_SECRET_KEY
 
 class CreateGiftCardView(APIView):
     permission_classes = [IsAuthenticated]
     serializer_class = GiftCardSerializer
 
     def post(self, request):
+        # CAPTCHA verification
+
+        captcha_response = request.POST.get("cf-turnstile-response")
+        data = {"secret": CLOUDFLARE_SECRET_KEY, "response": captcha_response}
+        captcha_verification = requests.post("https://challenges.cloudflare.com/turnstile/v0/siteverify", data=data)
+        captcha_result = captcha_verification.json()
+
+        if not captcha_result.get("success"):
+            return Response({"detail": "Invalid CAPTCHA."}, status=status.HTTP_400_BAD_REQUEST)
+
         # Extract data from request
         amount = request.data.get('amount')
         gift_type = request.data.get('gift_type', 'myself')  # Default to 'self'
@@ -36,37 +46,27 @@ class CreateGiftCardView(APIView):
         if amount <= Decimal('0.00'):
             return Response({"detail": "Amount must be greater than zero."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate 'single' gift type
         if gift_type == 'single':
             if not recipient_phone:
                 return Response({"detail": "Recipient phone number is required for single gifts."},
                                 status=status.HTTP_400_BAD_REQUEST)
-
-            # Check if recipient exists
             recipient = CustomUser.objects.filter(phone_number=recipient_phone).first()
             if not recipient:
                 return Response({"detail": "Recipient user not found."}, status=status.HTTP_404_NOT_FOUND)
-
-            # Get recipient's main account or create one
             recipient_account, _ = MainAccount.objects.get_or_create(user=recipient)
 
         try:
-            # Get the sender's main account
             sender_account = MainAccount.objects.get(user=request.user)
         except MainAccount.DoesNotExist:
             return Response({"detail": "Main account not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        # Check if the sender has enough balance
         if sender_account.balance < amount:
             return Response({"detail": "Insufficient balance."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Start a database transaction to avoid race conditions
         with transaction.atomic():
-            # Deduct the amount from the sender's main account
             sender_account.balance -= amount
             sender_account.save()
 
-            # Call the external service to generate the gift card
             url = "https://sandbox.lithic.com/v1/cards"
             payload = {"type": "VIRTUAL"}
             headers = {
@@ -77,7 +77,6 @@ class CreateGiftCardView(APIView):
 
             response = requests.post(url, json=payload, headers=headers)
 
-            # If the response is successful, create the gift card
             if response.status_code == 200:
                 card_data = response.json()
                 card_code = card_data.get('token')
@@ -86,12 +85,9 @@ class CreateGiftCardView(APIView):
                 exp_year = card_data.get('exp_year')
 
                 if card_code and cvv and exp_month and exp_year:
-                    # Set the owner based on gift type
                     owner = recipient if gift_type == 'single' else request.user
-
-                    # Create the gift card record in the database
                     gift_card = GiftCard.objects.create(
-                        user=owner,  # Assign ownership
+                        user=owner,
                         amount=amount,
                         card_code=card_code,
                         cvv=cvv,
@@ -100,8 +96,6 @@ class CreateGiftCardView(APIView):
                         gift_type=gift_type,
                         recipient_phone=recipient_phone if gift_type == 'single' else None
                     )
-
-                    # Serialize the gift card info to return in the response
                     serializer = GiftCardSerializer(gift_card)
                     return Response(serializer.data, status=status.HTTP_201_CREATED)
                 else:
@@ -113,23 +107,24 @@ class AddBalanceAPIView(APIView):
     serializer_class = AddBalanceSerializer
 
     def post(self, request):
-        # Check if the user is authenticated
         if not request.user.is_authenticated:
             return Response({"detail": "Authentication credentials were not provided."},
                             status=status.HTTP_401_UNAUTHORIZED)
 
-        # Serialize and validate input data
+        captcha_response = request.POST.get("cf-turnstile-response")
+        data = {"secret": CLOUDFLARE_SECRET_KEY, "response": captcha_response}
+        captcha_verification = requests.post("https://challenges.cloudflare.com/turnstile/v0/siteverify", data=data)
+        captcha_result = captcha_verification.json()
+
+        if not captcha_result.get("success"):
+            return Response({"detail": "Invalid CAPTCHA."}, status=status.HTTP_400_BAD_REQUEST)
+
         serializer = AddBalanceSerializer(data=request.data)
         if serializer.is_valid():
-            # Extract the amount from the validated data
             amount = serializer.validated_data["amount"]
             try:
-                # Retrieve or create the MainAccount for the user
                 account, created = MainAccount.objects.get_or_create(user=request.user)
-
-                # Add balance to the account
                 account.add_balance(amount)
-
                 return Response({"message": f"Successfully added {amount} GEL to your account."},
                                 status=status.HTTP_200_OK)
             except MainAccount.DoesNotExist:

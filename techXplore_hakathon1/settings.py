@@ -153,4 +153,4 @@ REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 
-
+CLOUDFLARE_SECRET_KEY = "0x4AAAAAAA9x2qYrbbm51k7zbwmFg0yF8S8"
